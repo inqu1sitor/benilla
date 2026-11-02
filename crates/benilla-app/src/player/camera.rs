@@ -595,6 +595,9 @@ pub(crate) struct CameraControl {
     /// `[cam+0x90] & 0x30000`, written only by the solver `0x50e570`, [`SmartPivot`]'s sixth
     /// conjunct; the look session reads it a frame later, as `0x50fee0` (from `0x514446`) does.
     pub(super) clipped: bool,
+    /// An embedding launcher's board camera holds the view ([`crate::embed::BoardCamera`]): a
+    /// press still runs its click test but never takes the cursor or turns the view.
+    pub(crate) board_held: bool,
 }
 
 impl CameraControl {
@@ -1109,7 +1112,7 @@ fn engage_look(
     cursor_opts: &mut CursorOptions,
 ) {
     rig.look = Some(button);
-    if focused {
+    if focused && !rig.board_held {
         take_cursor(rig, window, cursor_opts);
     } else {
         rig.cursor_released = true;
@@ -1157,6 +1160,10 @@ fn sync_look_focus(
 ) -> bool {
     if rig.look.is_none() {
         return focused;
+    }
+    // Under a board camera the cursor stays the player's and the mouse turns nothing.
+    if rig.board_held {
+        return false;
     }
     match (focused, rig.cursor_released) {
         (false, false) => {

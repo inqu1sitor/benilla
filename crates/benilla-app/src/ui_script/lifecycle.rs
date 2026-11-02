@@ -67,8 +67,14 @@ fn install_glue_vm(world: &mut World, screen: Option<&str>) -> bool {
         cvars.seed_vm(&mut script);
     }
     seed_agreements(world, &mut script);
+    // An embedding launcher's functions, before any glue file can call them.
+    let hooks = world
+        .get_resource::<crate::embed::ScriptHooks>()
+        .cloned()
+        .unwrap_or_default();
+    hooks.install(script.lua(), crate::embed::VmKind::Glue);
     let start = std::time::Instant::now();
-    let failures = super::glue::load_glue(&mut script);
+    let failures = super::glue::load_glue_with(&mut script, hooks.glue_addon());
     super::glue::finish_glue_load_log(&mut script);
     start_server_alert(world, &script);
     // What the glue carries across its rebuild, in place before the screen's `OnShow` reads it.
@@ -518,6 +524,10 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
     // write is the world entry's own.
     for name in benilla_ui::script::IN_WORLD_READ_ONLY_CVARS {
         script.set_cvar_read_only(name, true);
+    }
+    // An embedding launcher's functions, before any interface file or addon can call them.
+    if let Some(hooks) = world.get_resource::<crate::embed::ScriptHooks>() {
+        hooks.install(script.lua(), crate::embed::VmKind::World);
     }
     // The player too, before the addon walk. The record first: the reference's
     // `UnitName`/`UnitRace`/`UnitClass`/`UnitSex` read only a copy of the char-enum row made at the

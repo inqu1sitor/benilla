@@ -3,6 +3,9 @@
 //!
 //! 1. `$WOW_DATA`. Set and empty (`WOW_DATA=`) means no install and ends the search, so the
 //!    no-install path runs on a machine that has one.
+//!
+//!    Else the folder an embedding launcher chose ([`set_data_override`]), for a crate on top of
+//!    benilla that finds or asks for the install itself before the client starts.
 //! 2. `<project folder>/WoW/Data`, `dev` builds only ([`project_folder`]).
 //! 3. `<exe dir>/Data`, then `<exe dir>/WoW/Data`, the release layouts.
 //!
@@ -16,6 +19,16 @@ use std::sync::OnceLock;
 
 /// The launcher's project folder, handed in by its entry point ([`set_project_folder`]).
 static LAUNCHER_FOLDER: OnceLock<PathBuf> = OnceLock::new();
+
+/// The `Data` folder an embedding launcher chose ([`set_data_override`]).
+static DATA_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record the `Data` folder a launcher on top of benilla found or the player picked, so every
+/// reader of [`wow_data`] uses it; `$WOW_DATA` still wins. Call once, before the client starts; a
+/// later call changes nothing.
+pub fn set_data_override(dir: PathBuf) {
+    let _ = DATA_OVERRIDE.set(dir);
+}
 
 /// Record the launcher's project folder, as its build stamp names it (`BuildId::project_dir`); an
 /// empty stamp, a player build's, records nothing. The entry point calls this once, before
@@ -60,7 +73,9 @@ pub fn wow_data() -> Option<PathBuf> {
 /// Every place [`wow_data`] looks, in order, whether or not it exists, for a "looked in" message.
 pub fn candidates() -> Vec<PathBuf> {
     candidates_from(
-        std::env::var_os("WOW_DATA").map(PathBuf::from),
+        std::env::var_os("WOW_DATA")
+            .map(PathBuf::from)
+            .or_else(|| DATA_OVERRIDE.get().cloned()),
         project_folder(),
         std::env::current_exe()
             .ok()
