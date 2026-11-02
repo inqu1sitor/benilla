@@ -75,8 +75,9 @@ pub(super) fn read_attacker_state(r: &mut impl Read) -> io::Result<AttackerState
         }
         let _damage_f = read_f32_le(r)?;
         let _damage = read_u32_le(r)?;
-        absorb += read_u32_le(r)?;
-        resist += read_u32_le(r)? as i32;
+        // 32-bit sums as the reference's: a server's huge values wrap, never panic.
+        absorb = absorb.wrapping_add(read_u32_le(r)?);
+        resist = resist.wrapping_add(read_u32_le(r)? as i32);
     }
     let victim_state = read_u32_le(r)?;
     // The tail from `TargetState` (`Unit.cpp:4601`) lands at `rec+0xa4`..`+0xb0`
