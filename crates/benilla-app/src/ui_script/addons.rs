@@ -395,6 +395,23 @@ fn sweep_moves(last: &mut BTreeSet<String>, now: BTreeSet<String>) -> bool {
     moves
 }
 
+/// An embedding launcher's glue addon, `<root>/<name>/<name>.toc` and its files, loaded onto the
+/// glue VM ([`crate::embed::GlueAddon`]); returns its failures, one for a missing manifest.
+pub(super) fn load_glue_addon(script: &UiScript, root: &Path, name: &str) -> Vec<String> {
+    let Some(text) = manifest_in(&root.join(name), name) else {
+        let e = format!("{name}: no {name}.toc under {}", root.display());
+        error!("ui_script: {e}");
+        return vec![e];
+    };
+    let addon = Addon {
+        name: name.to_string(),
+        toc: Toc::parse(&text),
+        source: Source::Dir(root.to_path_buf()),
+    };
+    let files = addon.toc.files.clone();
+    addon.load_files(script, &files)
+}
+
 /// The player's own addons: every folder under the AddOns root with a `<Name>.toc`, in
 /// [`sort_by_directory_order`].
 fn discover_folder() -> Vec<Addon> {

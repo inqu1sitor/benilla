@@ -53,6 +53,8 @@ mod dev;
 #[cfg(feature = "dev")]
 mod devtools;
 mod doodad_events;
+/// Hooks for a launcher built on top of benilla; inert until one uses them.
+pub mod embed;
 mod entities;
 mod field_watch;
 mod fishing_line;
@@ -463,6 +465,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             eprintln!("executor: no render app — ExtractSchedule flip NOT applied");
         }
     }
+
+    // The embedding hooks ([`embed`]), inert until a crate on top turns one on.
+    app.add_plugins(embed::EmbedPlugin);
 
     // A crate on top of benilla adds its plugins here ([`run_with`]).
     if let Some(extend) = extend {

@@ -123,6 +123,15 @@ impl GlueScreen {
 /// is tagged `"GlueXML/<file>: <error>"`, a handler that raised during the walk is one too. The
 /// load's record is left for [`finish_glue_load_log`].
 pub(super) fn load_glue(script: &mut UiScript) -> Vec<String> {
+    load_glue_with(script, None)
+}
+
+/// [`load_glue`], plus an embedding launcher's own glue addon after the layer
+/// ([`crate::embed::ScriptHooks::set_glue_addon`]).
+pub(super) fn load_glue_with(
+    script: &mut UiScript,
+    extra: Option<&crate::embed::GlueAddon>,
+) -> Vec<String> {
     // The builder's sweep before the checks and the toc (`0x46a8eb`).
     super::addons::sweep_loose_interface();
     let mut failures = match reference_ui::glue() {
@@ -154,6 +163,13 @@ pub(super) fn load_glue(script: &mut UiScript) -> Vec<String> {
     };
     if super::manifest::layer_enabled() {
         failures.extend(load_glue_layer(script));
+    }
+    if let Some(extra) = extra {
+        failures.extend(super::addons::load_glue_addon(
+            script,
+            &extra.root,
+            &extra.name,
+        ));
     }
     script.fire_event("FRAMES_LOADED", vec![]);
     failures.extend(
