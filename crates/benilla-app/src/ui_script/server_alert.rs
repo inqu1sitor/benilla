@@ -501,10 +501,21 @@ pub(super) fn allowed() -> bool {
 /// manager once (`0x46a400`), so the fetch happens once however many glue VMs follow.
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `$WOW_NO_SERVER_ALERT` set: no alert fetch at all. Deviation: the reference always fetches;
+/// an embedder that promises its players no outside traffic (no request to a web host they did not
+/// pick) sets this, and the login screen then shows no alert, as after a failed fetch.
+pub(super) fn opted_out() -> bool {
+    std::env::var_os("WOW_NO_SERVER_ALERT").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// The fetch for the glue manager's init (`0x46a564`): started once per process, and only for a
-/// URL that is not empty, when the run [`allowed`] it.
+/// URL that is not empty, when the run [`allowed`] it and the embedder did not opt out.
 pub(super) fn begin_once(url: &str) -> Option<crossbeam_channel::Receiver<Option<Vec<u8>>>> {
-    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) || !allowed() || url.is_empty() {
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst)
+        || !allowed()
+        || opted_out()
+        || url.is_empty()
+    {
         return None;
     }
     Some(spawn_fetch(url.to_string()))

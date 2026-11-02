@@ -714,6 +714,43 @@ fn run(
     }
 }
 
+/// `$WOW_PIN_WORLD_HOST` set: the world dial goes to the host the logon dialed, at the port the
+/// realm list names. Deviation: the reference dials the realm list's address as it is; an embedder
+/// that only trusts the address it was given (a join code) sets this, so a logon server cannot
+/// send the client to any other machine.
+fn pin_world_host() -> bool {
+    std::env::var_os("WOW_PIN_WORLD_HOST").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `logon`'s host (a `host[:port]` realmlist) with `realm`'s port (a realm list `host:port`;
+/// the 1.12 default 8085 when it names none or a bad one).
+fn pinned_world_address(logon: &str, realm: &str) -> String {
+    fn split(a: &str) -> (&str, Option<&str>) {
+        if let Some(rest) = a.strip_prefix('[') {
+            // `[v6]:port`
+            return match rest.split_once(']') {
+                Some((h, tail)) => (h, tail.strip_prefix(':')),
+                None => (a, None),
+            };
+        }
+        match a.split_once(':') {
+            Some((h, p)) if !p.contains(':') => (h, Some(p)),
+            // A bare IPv6 address has no port.
+            _ => (a, None),
+        }
+    }
+    let (host, _) = split(logon.trim());
+    let port = split(realm.trim())
+        .1
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8085);
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// One world attempt and, past the roster, its session: the dial to `pick`'s realm, the roster,
 /// the character park, then the world stream. Change Realm at the character park dials again from here with the same
 /// session key. A cancel is an abandon generation past the one the pick carried.
@@ -760,7 +797,11 @@ fn world(
             realm.address,
             logon.realms.len()
         );
-        let world_addr = realm.address.clone();
+        let world_addr = if pin_world_host() {
+            pinned_world_address(&req.host, &realm.address)
+        } else {
+            realm.address.clone()
+        };
 
         stage(LoginStage::Handshaking);
         // For the queue dialog to name; the roster that carries it comes after the queue.
@@ -2127,5 +2168,40 @@ mod rtt_tests {
             .traffic
             .as_ref()
             .is_some_and(|t| std::sync::Arc::ptr_eq(t, &traffic)));
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::pinned_world_address;
+
+    /// The pinned dial keeps the logon's host whatever the realm list says, and the list's port.
+    #[test]
+    fn the_pinned_world_dial_keeps_the_logon_host() {
+        let cases = [
+            ("203.0.113.5:7777", "10.0.0.9:7778", "203.0.113.5:7778"),
+            (
+                "203.0.113.5:7777",
+                "evil.example.org:7778",
+                "203.0.113.5:7778",
+            ),
+            ("203.0.113.5", "192.168.1.1:80", "203.0.113.5:80"),
+            (
+                "host.example.org:7777",
+                "127.0.0.1:7778",
+                "host.example.org:7778",
+            ),
+            ("[2001:db8::1]:7777", "10.0.0.9:7778", "[2001:db8::1]:7778"),
+            ("2001:db8::1", "10.0.0.9:7778", "[2001:db8::1]:7778"),
+            ("203.0.113.5:7777", "no-port", "203.0.113.5:8085"),
+            ("203.0.113.5:7777", "x:99999", "203.0.113.5:8085"),
+        ];
+        for (logon, realm, want) in cases {
+            assert_eq!(
+                pinned_world_address(logon, realm),
+                want,
+                "{logon} + {realm}"
+            );
+        }
     }
 }

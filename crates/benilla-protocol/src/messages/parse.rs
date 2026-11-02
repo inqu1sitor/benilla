@@ -28,15 +28,44 @@ fn read_force_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPack
     })
 }
 
+/// The most a compressed packet may inflate to: well past any update a 1.12 server builds.
+const MAX_INFLATED: usize = 16 << 20;
+
+/// Inflate the zlib stream at `r` into at most `declared` bytes, the size the packet's `u32`
+/// names. The reference `uncompress`es into a buffer of that size, which fails on a stream that
+/// would run past it; so does this, and a stream that keeps going is never read further.
+/// Deviation: a declared size past [`MAX_INFLATED`] is refused rather than allocated, so a server
+/// cannot make the client hold gigabytes with a few kilobytes of zlib.
+fn inflate_declared(r: &mut &[u8], declared: usize) -> io::Result<Vec<u8>> {
+    if declared > MAX_INFLATED {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("compressed packet declares {declared} bytes, over the {MAX_INFLATED} cap"),
+        ));
+    }
+    let mut out = Vec::with_capacity(declared.min(64 * 1024));
+    // `bufread`, not `read`: the cursor must stop at the stream's end for the tail to be seen.
+    // One byte past `declared` is asked for, so a stream that is exactly as long is read to its
+    // checksum and a longer one shows itself.
+    flate2::bufread::ZlibDecoder::new(r)
+        .take(declared as u64 + 1)
+        .read_to_end(&mut out)?;
+    if out.len() > declared {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("compressed packet inflates past its declared {declared} bytes"),
+        ));
+    }
+    Ok(out)
+}
+
 /// Read an `SMSG_COMPRESSED_MOVES` body: `u32` uncompressed size, then deflated
 /// `[u8 size][u16 opcode][body]` records, `size` counting the opcode (`MovementData::AddPacket`).
 /// Each record goes back through [`parse_server`], and one bad record fails the whole batch; only
 /// the `MSG_MOVE_*` relays can appear (vmangos `ObjectViewersMovementDeliverer`).
 fn read_compressed_moves(r: &mut &[u8]) -> io::Result<Vec<ServerPacket>> {
     let uncompressed = read_u32_le(r)? as usize;
-    let mut buf = Vec::with_capacity(uncompressed.min(64 * 1024));
-    // `bufread`, not `read`: the cursor must stop at the stream's end for the tail to be seen.
-    flate2::bufread::ZlibDecoder::new(r).read_to_end(&mut buf)?;
+    let buf = inflate_declared(r, uncompressed)?;
     let mut rest = buf.as_slice();
     let mut packets = Vec::new();
     while !rest.is_empty() {
@@ -60,11 +89,14 @@ fn read_compressed_moves(r: &mut &[u8]) -> io::Result<Vec<ServerPacket>> {
         }
         let (body, tail) = rest.split_at(body_len);
         rest = tail;
-        // A batch inside a batch would recurse without bound; vmangos never nests one.
-        if opcode == opcode::SMSG_COMPRESSED_MOVES {
+        // A batch inside a batch would recurse without bound, and a compressed update inside one
+        // would inflate again per record; vmangos nests neither, only `MSG_MOVE_*` relays.
+        if opcode == opcode::SMSG_COMPRESSED_MOVES
+            || opcode == opcode::SMSG_COMPRESSED_UPDATE_OBJECT
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "compressed-moves nested inside compressed-moves",
+                format!("compressed-moves record {opcode:#06x} is itself compressed"),
             ));
         }
         packets.push(parse_server(opcode, body).map_err(|e| {
@@ -344,13 +376,9 @@ fn parse_server_body(
             cinematic_id: read_u32_le(&mut r)?,
         },
         opcode::SMSG_COMPRESSED_UPDATE_OBJECT => {
-            let _decompressed_size = read_u32_le(&mut r)?;
-            // `&mut r` so the cursor advances over the zlib bytes (by value it reads a copy), and
-            // `bufread`, not `read`, whose 32 KiB buffer would swallow bytes after the stream.
-            let mut decoder = flate2::bufread::ZlibDecoder::new(&mut r);
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)?;
-            drop(decoder);
+            let decompressed_size = read_u32_le(&mut r)? as usize;
+            // `&mut r` so the cursor advances over the zlib bytes (by value it reads a copy).
+            let decompressed = inflate_declared(&mut r, decompressed_size)?;
             let mut dr = decompressed.as_slice();
             let (first_pass, objects) = update_object::read_update_object(&mut dr)?;
             *inner_tail = dr.len();
@@ -1828,6 +1856,48 @@ mod tests {
             tail, 2,
             "the body's bytes after the zlib stream are the tail"
         );
+    }
+
+    /// A server's zlib bomb: a few KiB that would inflate to many MiB. Neither compressed opcode
+    /// inflates past the size the packet declares, nor accepts a declared size past the cap.
+    #[test]
+    fn compressed_packets_never_inflate_past_their_declared_size() {
+        use std::io::Write;
+        fn zlib(inflated: &[u8]) -> Vec<u8> {
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+            z.write_all(inflated).unwrap();
+            z.finish().unwrap()
+        }
+        let bomb = zlib(&vec![0u8; 64 << 20]);
+        assert!(bomb.len() < 128 * 1024, "{} bytes", bomb.len());
+        for op in [
+            opcode::SMSG_COMPRESSED_UPDATE_OBJECT,
+            opcode::SMSG_COMPRESSED_MOVES,
+        ] {
+            // An honest-looking small size with a huge stream behind it.
+            let mut body = 64u32.to_le_bytes().to_vec();
+            body.extend(&bomb);
+            let Err(e) = parse_server(op, &body) else {
+                panic!("{op:#06x}: a bomb decoded")
+            };
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            // A declared size past the cap is refused before any inflating.
+            let mut body = (64u32 << 20).to_le_bytes().to_vec();
+            body.extend(&bomb);
+            let Err(e) = parse_server(op, &body) else {
+                panic!("{op:#06x}: an over-cap size decoded")
+            };
+            assert!(e.to_string().contains("cap"), "{e}");
+        }
+        // An exact declared size still decodes, its stream read to the end.
+        let empty = [0u8, 0, 0, 0, 0];
+        let mut body = (empty.len() as u32).to_le_bytes().to_vec();
+        body.extend(zlib(&empty));
+        let Ok((_, tail)) = parse_server_with_tail(opcode::SMSG_COMPRESSED_UPDATE_OBJECT, &body)
+        else {
+            panic!("an exact size decodes")
+        };
+        assert_eq!(tail, 0);
     }
 
     #[test]
